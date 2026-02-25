@@ -151,11 +151,16 @@ st.markdown("""
     label { color: #cbd5e1 !important; }
 
     /* Streamlit overrides */
-    .stTextInput > div > div > input {
+    .stTextInput > div > div > input,
+    .stTextInput input,
+    input[type="text"],
+    div[data-baseweb="input"] input,
+    div[data-baseweb="base-input"] input {
         background: rgba(255,255,255,0.06) !important;
         border: 1px solid rgba(255,255,255,0.15) !important;
-        color: #f1f5f9 !important;
+        color: #ffffff !important;
         border-radius: 8px !important;
+        -webkit-text-fill-color: #ffffff !important;
     }
     .stFileUploader {
         background: rgba(255,255,255,0.04) !important;
