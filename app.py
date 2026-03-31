@@ -3,10 +3,9 @@ import re
 from datetime import datetime
 import streamlit as st
 from docx import Document
-from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK
 from docx.oxml import OxmlElement
 from docx.text.paragraph import Paragraph
-from docx.shared import Pt
 
 st.set_page_config(page_title="Smart MOP Generator", layout="wide")
 
@@ -28,8 +27,9 @@ def normalize(text):
 # ---------- ACTIVITY NAME ----------
 def extract_activity(doc):
     for p in doc.paragraphs[:20]:
-        if "mop:" in p.text.lower():
-            return p.text.split(":")[1].strip()
+        txt = p.text.strip()
+        if "mop:" in txt.lower():
+            return txt.split(":")[1].strip()
     return doc.paragraphs[0].text.strip()
 
 # ---------- PARSE ----------
@@ -52,26 +52,15 @@ def parse_sections(doc):
             if current:
                 data[current].append(txt)
 
+    # fallback
     for k in data:
         if not data[k]:
             data[k] = ["N/A"]
 
     return data
 
-# ---------- CLEAR PAGE 2 CONTENT ----------
-def clear_template_content(doc):
-    start = False
-    for p in doc.paragraphs:
-        txt = normalize(p.text)
-
-        if "objective" in txt:
-            start = True
-
-        if start:
-            p.text = ""   # clear everything from page 2 onward
-
-# ---------- INSERT PARA ----------
-def insert_para_after(paragraph, text, bold=False):
+# ---------- SAFE INSERT ----------
+def insert_after(paragraph, text, bold=False):
     new_p = OxmlElement("w:p")
     paragraph._p.addnext(new_p)
     new_para = Paragraph(new_p, paragraph._parent)
@@ -82,14 +71,32 @@ def insert_para_after(paragraph, text, bold=False):
 # ---------- PAGE BREAK ----------
 def add_page_break(paragraph):
     run = paragraph.add_run()
-    run.add_break(1)
+    run.add_break(WD_BREAK.PAGE)
+
+# ---------- FIND TOC ----------
+def find_toc_anchor(doc):
+    for p in doc.paragraphs:
+        txt = normalize(p.text)
+        if "contents" in txt or "table of content" in txt:
+            return p
+    return doc.paragraphs[-1]
+
+# ---------- CLEAR PAGE 2 ----------
+def clear_template_content(doc):
+    start = False
+    for p in doc.paragraphs:
+        txt = normalize(p.text)
+        if "objective" in txt:
+            start = True
+        if start:
+            p.text = ""
 
 # ---------- BUILD ----------
 def build_mop(template_bytes, solution_doc):
 
     doc = Document(io.BytesIO(template_bytes))
 
-    # ===== DATE UPDATE =====
+    # ===== HEADER DATE UPDATE =====
     today = datetime.today().strftime("%d %B %Y")
     for sec in doc.sections:
         for p in sec.header.paragraphs:
@@ -104,31 +111,28 @@ def build_mop(template_bytes, solution_doc):
             p.text = activity
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-    # ===== REMOVE TEMPLATE BODY =====
+    # ===== CLEAR TEMPLATE PAGE 2 =====
     clear_template_content(doc)
 
-    # ===== FIND TOC END (Page 1 end) =====
-    last_para = doc.paragraphs[-1]
+    # ===== FIND PAGE 1 END =====
+    toc_para = find_toc_anchor(doc)
 
-    # ===== FORCE PAGE BREAK =====
-    add_page_break(last_para)
+    # ===== PAGE BREAK =====
+    add_page_break(toc_para)
 
     # ===== PARSE DATA =====
     data = parse_sections(solution_doc)
 
     # ===== INSERT PAGE 2 CONTENT =====
-    ref = last_para
+    ref = toc_para
 
     for idx, sec in enumerate(SECTIONS, start=1):
 
-        # heading (with numbering)
         heading_text = f"{idx}. {sec.title()}"
+        ref = insert_after(ref, heading_text, bold=True)
 
-        ref = insert_para_after(ref, heading_text, bold=True)
-
-        # content
         for line in data[sec]:
-            ref = insert_para_after(ref, line)
+            ref = insert_after(ref, line)
 
     # ===== SAVE =====
     buffer = io.BytesIO()
@@ -140,16 +144,18 @@ def build_mop(template_bytes, solution_doc):
 # ---------- UI ----------
 st.title("🚀 Smart MOP Generator")
 
-st.markdown("### 📄 Fixed Template Based MOP Generation")
+st.markdown("### 📄 Template-based MOP Generator")
+st.markdown("✔ Page 1 → Method of Procedure + Activity Name + TOC")
+st.markdown("✔ Page 2 → Auto content mapping (12 sections)")
 
-st.info("🔒 Privacy Guaranteed: No data stored. Runs fully in-memory.")
+st.info("🔒 Privacy Notice: No data is stored. Processing is fully in-memory.")
 
-uploaded = st.file_uploader("Upload Solution Document (.docx)", type=["docx"])
+uploaded = st.file_uploader("📤 Upload Solution Document (.docx)", type=["docx"])
 
-if st.button("Generate MOP"):
+if st.button("⚡ Generate MOP"):
 
     if not uploaded:
-        st.warning("Please upload a file")
+        st.warning("Please upload a document first")
         st.stop()
 
     solution_doc = Document(io.BytesIO(uploaded.read()))
@@ -157,10 +163,10 @@ if st.button("Generate MOP"):
 
     output, activity = build_mop(template_bytes, solution_doc)
 
-    st.success("MOP Generated Successfully")
+    st.success("✅ MOP Generated Successfully")
 
     st.download_button(
-        "Download MOP",
+        "⬇️ Download MOP",
         data=output,
         file_name=f"{activity}.docx"
     )
