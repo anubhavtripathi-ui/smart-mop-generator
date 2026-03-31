@@ -6,6 +6,7 @@ from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK
 from docx.oxml import OxmlElement
 from docx.text.paragraph import Paragraph
+from docx.oxml.ns import qn   # ✅ NEW
 
 st.set_page_config(page_title="Smart MOP Generator", layout="wide")
 
@@ -91,6 +92,27 @@ def clear_template_content(doc):
         if start:
             p.text = ""
 
+# ---------- ADD TOC FIELD (NEW) ----------
+def add_toc(paragraph):
+    run = paragraph.add_run()
+
+    fldChar_begin = OxmlElement('w:fldChar')
+    fldChar_begin.set(qn('w:fldCharType'), 'begin')
+
+    instrText = OxmlElement('w:instrText')
+    instrText.text = 'TOC \\o "1-3" \\h \\z \\u'
+
+    fldChar_separate = OxmlElement('w:fldChar')
+    fldChar_separate.set(qn('w:fldCharType'), 'separate')
+
+    fldChar_end = OxmlElement('w:fldChar')
+    fldChar_end.set(qn('w:fldCharType'), 'end')
+
+    run._r.append(fldChar_begin)
+    run._r.append(instrText)
+    run._r.append(fldChar_separate)
+    run._r.append(fldChar_end)
+
 # ---------- BUILD ----------
 def build_mop(template_bytes, solution_doc):
 
@@ -117,6 +139,9 @@ def build_mop(template_bytes, solution_doc):
     # ===== FIND PAGE 1 END =====
     toc_para = find_toc_anchor(doc)
 
+    # ✅ ADD TOC HERE (NEW)
+    add_toc(toc_para)
+
     # ===== PAGE BREAK =====
     add_page_break(toc_para)
 
@@ -130,6 +155,9 @@ def build_mop(template_bytes, solution_doc):
 
         heading_text = f"{idx}. {sec.title()}"
         ref = insert_after(ref, heading_text, bold=True)
+
+        # ✅ MAKE HEADING DETECTABLE FOR TOC (NEW)
+        ref.style = "Heading 1"
 
         for line in data[sec]:
             ref = insert_after(ref, line)
