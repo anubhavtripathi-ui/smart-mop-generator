@@ -4,6 +4,8 @@ from datetime import datetime
 import streamlit as st
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import OxmlElement
+from docx.text.paragraph import Paragraph
 
 st.set_page_config(page_title="Smart MOP Generator", layout="wide")
 
@@ -28,7 +30,6 @@ def extract_activity(doc):
         txt = p.text.strip()
         if "mop:" in txt.lower():
             return txt.split(":")[1].strip()
-    # fallback
     return doc.paragraphs[0].text.strip()
 
 # ---------- PARSE ----------
@@ -51,14 +52,22 @@ def parse_sections(doc):
             if current:
                 data[current].append(txt)
 
-    # fallback fix
+    # fallback
     for k in data:
         if not data[k]:
             data[k] = ["N/A"]
 
     return data
 
-# ---------- REPLACE TEXT SAFE ----------
+# ---------- SAFE INSERT ----------
+def insert_after(paragraph, text):
+    new_p = OxmlElement("w:p")
+    paragraph._p.addnext(new_p)
+    new_para = Paragraph(new_p, paragraph._parent)
+    new_para.text = text
+    return new_para
+
+# ---------- TEXT REPLACE ----------
 def replace_text_preserve_format(paragraph, new_text):
     if paragraph.runs:
         paragraph.runs[0].text = new_text
@@ -72,12 +81,15 @@ def build_mop(template_bytes, solution_doc):
 
     doc = Document(io.BytesIO(template_bytes))
 
-    # ===== DATE =====
+    # ===== DATE UPDATE (HEADER ONLY) =====
     today = datetime.today().strftime("%d %B %Y")
     for sec in doc.sections:
         for p in sec.header.paragraphs:
             if "{{current date}}" in p.text.lower():
-                replace_text_preserve_format(p, p.text.replace("{{current date}}", today))
+                replace_text_preserve_format(
+                    p,
+                    p.text.replace("{{current date}}", today)
+                )
 
     # ===== ACTIVITY NAME =====
     activity = extract_activity(solution_doc)
@@ -90,24 +102,24 @@ def build_mop(template_bytes, solution_doc):
     # ===== PARSE =====
     data = parse_sections(solution_doc)
 
-    # ===== INSERT =====
+    # ===== INSERT CONTENT =====
     for i, p in enumerate(doc.paragraphs):
         heading = normalize(p.text)
 
         for sec in SECTIONS:
-            if sec == heading:
+            if sec in heading:   # IMPORTANT FIX
 
-                insert_index = i + 1
+                ref_para = p
 
-                # remove sample
-                if insert_index < len(doc.paragraphs):
-                    if "sample" in doc.paragraphs[insert_index].text.lower():
-                        doc.paragraphs[insert_index].text = ""
+                # remove "sample"
+                next_index = i + 1
+                if next_index < len(doc.paragraphs):
+                    if "sample" in doc.paragraphs[next_index].text.lower():
+                        doc.paragraphs[next_index].text = ""
 
-                # insert real data
+                # insert actual content
                 for line in data[sec]:
-                    doc.paragraphs[insert_index].insert_paragraph_before(line)
-                    insert_index += 1
+                    ref_para = insert_after(ref_para, line)
 
     # ===== SAVE =====
     buffer = io.BytesIO()
@@ -118,14 +130,18 @@ def build_mop(template_bytes, solution_doc):
 
 # ---------- UI ----------
 st.title("🚀 Smart MOP Generator")
-st.info("🔒 No data stored. Everything runs in memory.")
 
-uploaded = st.file_uploader("Upload Solution Document", type=["docx"])
+st.markdown("### 📄 Template Preview")
+st.markdown("👉 Upload solution doc → MOP will be generated based on fixed template")
 
-if st.button("Generate MOP"):
+st.info("🔒 Privacy: No data is stored. Everything runs in-memory only.")
+
+uploaded = st.file_uploader("📤 Upload Solution Document (.docx)", type=["docx"])
+
+if st.button("⚡ Generate MOP"):
 
     if not uploaded:
-        st.warning("Upload file first")
+        st.warning("⚠️ Please upload a document first")
         st.stop()
 
     solution_doc = Document(io.BytesIO(uploaded.read()))
@@ -136,7 +152,7 @@ if st.button("Generate MOP"):
     st.success("✅ MOP Generated Successfully")
 
     st.download_button(
-        "Download MOP",
+        "⬇️ Download MOP",
         data=output,
         file_name=f"{activity}.docx"
     )
