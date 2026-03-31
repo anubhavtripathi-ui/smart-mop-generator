@@ -31,29 +31,42 @@ SECTION_LABELS = {
 
 SECTION_KEYS = list(SECTION_LABELS.keys())
 
-# ================= PARSER =================
+# ================= ACTIVITY NAME =================
 def extract_activity_name(doc):
-    for para in doc.paragraphs[:5]:
-        if "MOP:" in para.text:
-            return para.text.replace("MOP:", "").strip()
+    for para in doc.paragraphs[:10]:
+        text = para.text.strip()
+        if text.lower().startswith("mop:"):
+            return text.replace("MOP:", "").strip()
     return "Activity Name"
 
-
+# ================= SECTION PARSER =================
 def extract_sections(doc):
     sections = {k: [] for k in SECTION_KEYS}
-    current = None
+    current_section = None
 
     for para in doc.paragraphs:
         text = para.text.strip()
 
+        if not text:
+            continue
+
+        # detect heading
+        detected = None
         for key, label in SECTION_LABELS.items():
-            if label.split(". ")[1].lower() in text.lower():
-                current = key
+            label_text = label.split(". ", 1)[1].lower()
+
+            if text.lower().startswith(label_text):
+                detected = key
                 break
 
-        if current and text and text not in SECTION_LABELS.values():
-            if not text.startswith("MOP"):
-                sections[current].append(text)
+        if detected:
+            current_section = detected
+            continue
+
+        # store content
+        if current_section:
+            if not text.lower().startswith("mop"):
+                sections[current_section].append(text)
 
     return sections
 
@@ -92,14 +105,21 @@ def build_mop(template_bytes, activity_name, sections):
         if key not in heading_positions:
             continue
 
-        index = heading_positions[key] + 1
+        start_index = heading_positions[key] + 1
         content = sections.get(key, [])
 
-        for line in content:
-            doc.paragraphs[index].insert_paragraph_before(line)
-            index += 1
+        # clear placeholder
+        next_para = doc.paragraphs[start_index]
+        if "sample" in next_para.text.lower():
+            next_para.text = ""
 
-    # -------- REMOVE SAMPLE TEXT --------
+        insert_index = start_index
+
+        for line in content:
+            doc.paragraphs[insert_index].insert_paragraph_before(line)
+            insert_index += 1
+
+    # -------- CLEAN EXTRA TEXT --------
     for para in doc.paragraphs:
         if "sample" in para.text.lower():
             para.text = ""
@@ -114,7 +134,6 @@ def build_mop(template_bytes, activity_name, sections):
 # ================= UI =================
 st.title("📋 Smart MOP Generator")
 
-# TEMPLATE
 templates = list(TEMPLATES_DIR.glob("*.docx"))
 
 if not templates:
@@ -124,7 +143,6 @@ if not templates:
 template_file = st.selectbox("Select Template", templates)
 template_bytes = open(template_file, "rb").read()
 
-# UPLOAD
 sol_file = st.file_uploader("Upload Solution Document", type=["docx"])
 
 if st.button("Generate MOP"):
@@ -140,7 +158,7 @@ if st.button("Generate MOP"):
 
     output = build_mop(template_bytes, activity_name, sections)
 
-    st.success("✅ MOP Generated")
+    st.success("✅ MOP Generated Successfully")
 
     st.download_button(
         "Download MOP",
