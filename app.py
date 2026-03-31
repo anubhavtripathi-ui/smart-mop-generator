@@ -1,10 +1,14 @@
 import io
 import re
 from datetime import datetime
+import streamlit as st
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 
-# ================= HEADINGS =================
+st.set_page_config(page_title="Smart MOP Generator", layout="wide")
+
+TEMPLATE_PATH = "templates/Template.docx"
+
 SECTIONS = [
     "Objective","Activity Description","Activity Type","Domain in Scope",
     "Pre-requisites","Inventory Details","Node Connectivity Process",
@@ -12,18 +16,18 @@ SECTIONS = [
     "Standard Operating Procedure","Acceptance Criteria","Assumptions"
 ]
 
-# ================= CLEAN =================
+# -------- CLEAN ----------
 def clean(text):
     return re.sub(r'^\d+[\.\)]\s*', '', text.strip().lower())
 
-# ================= ACTIVITY NAME =================
+# -------- ACTIVITY ----------
 def get_activity(doc):
-    for p in doc.paragraphs[:15]:
+    for p in doc.paragraphs[:20]:
         if "mop:" in p.text.lower():
             return p.text.split(":")[1].strip()
     return "Activity"
 
-# ================= PARSE =================
+# -------- PARSE ----------
 def parse(doc):
     data = {k: [] for k in SECTIONS}
     current = None
@@ -43,55 +47,84 @@ def parse(doc):
             if current:
                 data[current].append(txt)
 
+    # fallback
+    for k in data:
+        if not data[k]:
+            data[k] = ["N/A"]
+
     return data
 
-# ================= BUILD =================
-def build(template_path, solution_doc):
+# -------- BUILD ----------
+def build(template_bytes, solution_doc):
 
-    doc = Document(template_path)
+    doc = Document(io.BytesIO(template_bytes))
 
-    # ---- DATE FIX ----
+    # ===== FIX DATE =====
     today = datetime.today().strftime("%d %B %Y")
     for sec in doc.sections:
         for p in sec.header.paragraphs:
             if "{{current date}}" in p.text:
                 p.text = p.text.replace("{{current date}}", today)
 
+    # ===== ACTIVITY NAME =====
     activity = get_activity(solution_doc)
 
-    # ---- ACTIVITY NAME ----
     for p in doc.paragraphs:
         if "activity name" in p.text.lower():
             p.text = activity
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-    # ---- TOC BUILD ----
-    toc_index = None
-    for i,p in enumerate(doc.paragraphs):
-        if "contents" in p.text.lower():
-            toc_index = i
-            break
+    # ===== PARSE DATA =====
+    data = parse(solution_doc)
 
-    if toc_index:
-        for i,sec in enumerate(SECTIONS,1):
-            line = f"{i}. {sec}"
-            doc.paragraphs[toc_index+1].insert_paragraph_before(line)
+    # ===== STRICT 1:1 MAPPING =====
+    for i, p in enumerate(doc.paragraphs):
+        heading = clean(p.text)
 
-    # ---- PAGE BREAK ----
-    doc.add_page_break()
+        for sec in SECTIONS:
+            if heading == sec.lower():
 
-    # ---- CONTENT INSERT ----
-    sections = parse(solution_doc)
+                insert_index = i + 1
+                content = data[sec]
 
-    for sec in SECTIONS:
-        doc.add_paragraph(f"{sec}", style='Heading 1')
+                # clear existing placeholder safely
+                if insert_index < len(doc.paragraphs):
+                    if "sample" in doc.paragraphs[insert_index].text.lower():
+                        doc.paragraphs[insert_index].text = ""
 
-        for line in sections[sec]:
-            doc.add_paragraph(line)
+                # insert content
+                for line in content:
+                    doc.paragraphs[insert_index].insert_paragraph_before(line)
+                    insert_index += 1
 
-    # ---- SAVE ----
-    out = io.BytesIO()
-    doc.save(out)
-    out.seek(0)
+    # ===== SAVE =====
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
 
-    return out, activity
+    return buffer.getvalue(), activity
+
+# -------- UI ----------
+st.title("🚀 Smart MOP Generator")
+st.info("🔒 No data stored. Processing is fully in-memory.")
+
+uploaded = st.file_uploader("Upload Solution Document", type=["docx"])
+
+if st.button("Generate MOP"):
+
+    if not uploaded:
+        st.warning("Upload file first")
+        st.stop()
+
+    solution_doc = Document(io.BytesIO(uploaded.read()))
+    template_bytes = open(TEMPLATE_PATH, "rb").read()
+
+    output, activity = build(template_bytes, solution_doc)
+
+    st.success("MOP Generated Successfully")
+
+    st.download_button(
+        "Download MOP",
+        data=output,
+        file_name=f"{activity}.docx"
+    )
