@@ -171,7 +171,6 @@ def build_mop(template_bytes, solution_doc):
 
 # ---------- UI ----------
 st.title("🚀 Smart MOP Generator")
-st.markdown('<div class="card"><h3>📂 Step 1 — Select Template</h3>', unsafe_allow_html=True)
 
 st.markdown("### 📄 Template-based MOP Generator")
 
