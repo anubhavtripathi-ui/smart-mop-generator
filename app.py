@@ -10,25 +10,29 @@ st.set_page_config(page_title="Smart MOP Generator", layout="wide")
 TEMPLATE_PATH = "templates/Template.docx"
 
 SECTIONS = [
-    "Objective","Activity Description","Activity Type","Domain in Scope",
-    "Pre-requisites","Inventory Details","Node Connectivity Process",
-    "Identity & Access Management","Activity Triggering Method",
-    "Standard Operating Procedure","Acceptance Criteria","Assumptions"
+    "objective","activity description","activity type","domain in scope",
+    "pre-requisites","inventory details","node connectivity process",
+    "identity & access management","activity triggering method",
+    "standard operating procedure","acceptance criteria","assumptions"
 ]
 
-# -------- CLEAN ----------
-def clean(text):
-    return re.sub(r'^\d+[\.\)]\s*', '', text.strip().lower())
+# ---------- NORMALIZE ----------
+def normalize(text):
+    text = text.lower().strip()
+    text = re.sub(r'^\d+[\.\)]\s*', '', text)
+    return text
 
-# -------- ACTIVITY ----------
-def get_activity(doc):
+# ---------- ACTIVITY NAME ----------
+def extract_activity(doc):
     for p in doc.paragraphs[:20]:
-        if "mop:" in p.text.lower():
-            return p.text.split(":")[1].strip()
-    return "Activity"
+        txt = p.text.strip()
+        if "mop:" in txt.lower():
+            return txt.split(":")[1].strip()
+    # fallback
+    return doc.paragraphs[0].text.strip()
 
-# -------- PARSE ----------
-def parse(doc):
+# ---------- PARSE ----------
+def parse_sections(doc):
     data = {k: [] for k in SECTIONS}
     current = None
 
@@ -37,63 +41,71 @@ def parse(doc):
         if not txt:
             continue
 
-        t = clean(txt)
+        n = normalize(txt)
 
         for sec in SECTIONS:
-            if t.startswith(sec.lower()):
+            if sec in n:
                 current = sec
                 break
         else:
             if current:
                 data[current].append(txt)
 
-    # fallback
+    # fallback fix
     for k in data:
         if not data[k]:
             data[k] = ["N/A"]
 
     return data
 
-# -------- BUILD ----------
-def build(template_bytes, solution_doc):
+# ---------- REPLACE TEXT SAFE ----------
+def replace_text_preserve_format(paragraph, new_text):
+    if paragraph.runs:
+        paragraph.runs[0].text = new_text
+        for i in range(1, len(paragraph.runs)):
+            paragraph.runs[i].text = ""
+    else:
+        paragraph.text = new_text
+
+# ---------- BUILD ----------
+def build_mop(template_bytes, solution_doc):
 
     doc = Document(io.BytesIO(template_bytes))
 
-    # ===== FIX DATE =====
+    # ===== DATE =====
     today = datetime.today().strftime("%d %B %Y")
     for sec in doc.sections:
         for p in sec.header.paragraphs:
-            if "{{current date}}" in p.text:
-                p.text = p.text.replace("{{current date}}", today)
+            if "{{current date}}" in p.text.lower():
+                replace_text_preserve_format(p, p.text.replace("{{current date}}", today))
 
     # ===== ACTIVITY NAME =====
-    activity = get_activity(solution_doc)
+    activity = extract_activity(solution_doc)
 
     for p in doc.paragraphs:
-        if "activity name" in p.text.lower():
-            p.text = activity
+        if "activity name" in normalize(p.text):
+            replace_text_preserve_format(p, activity)
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-    # ===== PARSE DATA =====
-    data = parse(solution_doc)
+    # ===== PARSE =====
+    data = parse_sections(solution_doc)
 
-    # ===== STRICT 1:1 MAPPING =====
+    # ===== INSERT =====
     for i, p in enumerate(doc.paragraphs):
-        heading = clean(p.text)
+        heading = normalize(p.text)
 
         for sec in SECTIONS:
-            if heading == sec.lower():
+            if sec == heading:
 
                 insert_index = i + 1
-                content = data[sec]
 
-                # clear existing placeholder safely
+                # remove sample
                 if insert_index < len(doc.paragraphs):
                     if "sample" in doc.paragraphs[insert_index].text.lower():
                         doc.paragraphs[insert_index].text = ""
 
-                # insert content
-                for line in content:
+                # insert real data
+                for line in data[sec]:
                     doc.paragraphs[insert_index].insert_paragraph_before(line)
                     insert_index += 1
 
@@ -104,9 +116,9 @@ def build(template_bytes, solution_doc):
 
     return buffer.getvalue(), activity
 
-# -------- UI ----------
+# ---------- UI ----------
 st.title("🚀 Smart MOP Generator")
-st.info("🔒 No data stored. Processing is fully in-memory.")
+st.info("🔒 No data stored. Everything runs in memory.")
 
 uploaded = st.file_uploader("Upload Solution Document", type=["docx"])
 
@@ -119,9 +131,9 @@ if st.button("Generate MOP"):
     solution_doc = Document(io.BytesIO(uploaded.read()))
     template_bytes = open(TEMPLATE_PATH, "rb").read()
 
-    output, activity = build(template_bytes, solution_doc)
+    output, activity = build_mop(template_bytes, solution_doc)
 
-    st.success("MOP Generated Successfully")
+    st.success("✅ MOP Generated Successfully")
 
     st.download_button(
         "Download MOP",
