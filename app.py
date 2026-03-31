@@ -171,10 +171,9 @@ def build_mop(template_bytes, solution_doc):
 
 # ---------- UI ----------
 st.title("🚀 Smart MOP Generator")
+st.markdown('<div class="card"><h3>📂 Step 1 — Select Template</h3>', unsafe_allow_html=True)
 
 st.markdown("### 📄 Template-based MOP Generator")
-st.markdown("✔ Page 1 → Method of Procedure + Activity Name + TOC")
-st.markdown("✔ Page 2 → Auto content mapping (12 sections)")
 
 st.info("🔒 Privacy Notice: No data is stored. Processing is fully in-memory.")
 
