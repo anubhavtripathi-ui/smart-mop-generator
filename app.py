@@ -101,9 +101,20 @@ html, body, [class*="css"] {
     margin: 0 0 .3rem;
     line-height: 1.2;
 }
+.hero-title .ht-smart {
+    color: #3fb882;
+    font-style: italic;
+}
 .hero-title em {
     font-style: italic;
     color: #2d9cdb;
+    background: rgba(45,156,219,.1);
+    padding: 0 6px;
+    border-radius: 4px;
+}
+.hero-title .ht-gen {
+    color: #a78bfa;
+    font-style: italic;
 }
 .hero-sub {
     font-size: .85rem;
@@ -438,6 +449,24 @@ def normalize_heading(text: str) -> str | None:
 
 
 def extract_activity_name(doc: Document) -> str:
+    # Priority 1: italic+underline paragraph near top (before any section heading)
+    for para in doc.paragraphs[:15]:
+        text = para.text.strip()
+        if not text:
+            continue
+        # Skip known non-activity lines
+        if text.upper() in ("METHOD OF PROCEDURE", "CONTENTS:", "CONTENTS"):
+            continue
+        # Skip TOC lines like "1. Objective   Page 2"
+        if re.match(r'^\d+[\.\)]\s+\w.*Page\s+\d+', text):
+            continue
+        # Skip section headings (numbered like "1. Objective")
+        if re.match(r'^\d+[\.\)]\s+', text) and normalize_heading(text):
+            continue
+        for run in para.runs:
+            if run.italic and run.underline:
+                return text
+    # Priority 2: Heading 1 text
     for para in doc.paragraphs[:8]:
         if para.style.name.startswith("Heading 1"):
             name = para.text.strip()
@@ -445,10 +474,6 @@ def extract_activity_name(doc: Document) -> str:
             name = re.sub(r'^UC\s*:\s*', '', name, flags=re.IGNORECASE)
             if name:
                 return name
-    for para in doc.paragraphs[:10]:
-        for run in para.runs:
-            if run.italic and run.underline and para.text.strip():
-                return para.text.strip()
     return "Activity Name"
 
 
@@ -640,29 +665,53 @@ def build_mop(template_bytes: bytes, activity_name: str,
     _update_header_date(doc, today_str)
     _clear_and_prep_body(doc)
 
-    # Cover page
+    # Cover page — "METHOD OF PROCEDURE" title with bottom border separator
     p = doc.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    p.paragraph_format.space_after = Pt(4)
+    p.paragraph_format.space_after = Pt(6)
     _r(p, "METHOD OF PROCEDURE", size=18, bold=True, color=(0x7F, 0x7F, 0x7F))
 
+    # Thin separator line under the heading
+    p_sep = doc.add_paragraph()
+    p_sep.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p_sep.paragraph_format.space_before = Pt(0)
+    p_sep.paragraph_format.space_after = Pt(8)
+    pPr = p_sep._p.get_or_add_pPr()
+    pBdr = OxmlElement("w:pBdr")
+    bottom = OxmlElement("w:bottom")
+    bottom.set(qn("w:val"), "single")
+    bottom.set(qn("w:sz"), "6")
+    bottom.set(qn("w:space"), "1")
+    bottom.set(qn("w:color"), "4F81BD")
+    pBdr.append(bottom)
+    pPr.append(pBdr)
+
+    # Activity name — italic, underlined, centered
     p = doc.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    p.paragraph_format.space_after = Pt(4)
+    p.paragraph_format.space_after = Pt(10)
     _r(p, activity_name, size=14, italic=True, underline=True)
 
-    doc.add_paragraph().paragraph_format.space_after = Pt(2)
-
+    # CONTENTS heading
     p = doc.add_paragraph()
     p.paragraph_format.space_after = Pt(4)
     _r(p, "CONTENTS:", size=12, bold=True, underline=True)
 
-    for key in SECTION_KEYS[:-1]:
-        p = doc.add_paragraph()
-        p.paragraph_format.space_after = Pt(2)
-        _set_rtab(p, 8400)
-        _r(p, SECTION_LABELS[key], size=11)
-        _r(p, f"\tPage {TOC_PAGES.get(key, 2)}", size=11)
+    # TOC — insert Word native TOC field (updates on F9 / open in Word)
+    # This gives real page numbers when opened in Word
+    toc_p = doc.add_paragraph()
+    toc_p.paragraph_format.space_after = Pt(2)
+    run = toc_p.add_run()
+    fldChar_begin = OxmlElement("w:fldChar")
+    fldChar_begin.set(qn("w:fldCharType"), "begin")
+    instrText = OxmlElement("w:instrText")
+    instrText.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+    instrText.text = ' TOC \\o "1-2" \\h \\z \\u '
+    fldChar_end = OxmlElement("w:fldChar")
+    fldChar_end.set(qn("w:fldCharType"), "end")
+    run._r.append(fldChar_begin)
+    run._r.append(instrText)
+    run._r.append(fldChar_end)
 
     _pgbr(doc)
 
@@ -709,7 +758,7 @@ st.markdown('<div class="top-bar"></div>', unsafe_allow_html=True)
 st.markdown("""
 <div class="hero">
   <p class="hero-eyebrow">// TELECOM AUTOMATION TOOLKIT</p>
-  <h1 class="hero-title">Smart <em>MOP</em> Generator</h1>
+  <h1 class="hero-title"><span class="ht-smart">Smart</span> <em>MOP</em> <span class="ht-gen">Generator</span></h1>
   <p class="hero-sub">Upload your Solution Document and get a perfectly structured,<br>
   customer-submission ready Method of Procedure — instantly.</p>
   <div class="badge-row">
