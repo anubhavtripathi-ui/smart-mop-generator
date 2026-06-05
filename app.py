@@ -1672,6 +1672,18 @@ def _clone_para(src_elem, num_map: dict = None, full_para_text: str = None):
         if pBdr_el is not None:
             pPr_cl.remove(pBdr_el)
 
+    # ── Strip footnote & endnote reference runs ───────────────────────────────
+    # footnotes.xml / endnotes.xml from the source doc are never transferred to
+    # the output template, so any w:footnoteReference or w:endnoteReference tags
+    # that survive the deepcopy cause Word "unreadable content / Show Repairs"
+    # errors on open.  These runs contain ZERO visible text (only a superscript
+    # number marker) so removing them loses no content whatsoever.
+    # Safe for normal docs too — findall returns [] when none exist → no-op.
+    for _fn_run in cloned.findall(f".//{{{_W}}}r"):
+        if (_fn_run.find(f"{{{_W}}}footnoteReference") is not None or
+                _fn_run.find(f"{{{_W}}}endnoteReference") is not None):
+            _fn_run.getparent().remove(_fn_run)
+
     for run in cloned.findall(f".//{{{_W}}}r"):
         rpr = run.find(f"{{{_W}}}rPr")
         if rpr is None:
