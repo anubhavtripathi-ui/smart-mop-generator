@@ -29,7 +29,6 @@ import streamlit as st
 from docx import Document
 from docx.shared import Pt, RGBColor, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.enum.section import WD_ORIENT
 from docx.oxml.ns import qn, nsmap
 from docx.oxml import OxmlElement
 
@@ -1770,36 +1769,6 @@ def _clone_para(src_elem, num_map: dict = None, full_para_text: str = None,
     return cloned
 
 
-def _force_table_full_width(tbl_elem):
-    """
-    Set a table to occupy 100% of the destination page's text width,
-    preserving its existing column-ratio proportions exactly.
-    Uses tblLayout="fixed" (not "autofit") because "autofit" tells
-    Word/LibreOffice to size columns off cell *content* instead of the
-    declared percentage — which left short-content tables (e.g. a 2-column
-    table with just "FAN"/"Alarm Name") rendering narrower than the page
-    even with tblW set to 100%. "fixed" honours the percentage width
-    literally and distributes it across columns using their original
-    relative ratios.
-    """
-    _W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-    tblPr = tbl_elem.find(f"{{{_W}}}tblPr")
-    if tblPr is None:
-        tblPr = OxmlElement("w:tblPr")
-        tbl_elem.insert(0, tblPr)
-    for tag in ("tblW", "tblLayout"):
-        old = tblPr.find(f"{{{_W}}}{tag}")
-        if old is not None:
-            tblPr.remove(old)
-    tblW = OxmlElement("w:tblW")
-    tblW.set(qn("w:w"), "5000")
-    tblW.set(qn("w:type"), "pct")
-    tblPr.append(tblW)
-    tblLayout = OxmlElement("w:tblLayout")
-    tblLayout.set(qn("w:type"), "fixed")
-    tblPr.append(tblLayout)
-
-
 def _clone_table(src_tbl, num_map: dict = None):
     """Deep-clone a table normalising cell run formatting to house style."""
     cloned = deepcopy(src_tbl)
@@ -1816,8 +1785,23 @@ def _clone_table(src_tbl, num_map: dict = None):
     # Source tables (Solution Doc / Activity MOP) carry an absolute width
     # (dxa) sized for whichever page they were authored on. Cloning that
     # verbatim into a template with a different page size/orientation makes
-    # the table look too narrow (or overflow). See _force_table_full_width.
-    _force_table_full_width(cloned)
+    # the table look too narrow (or overflow). Switching to a percentage
+    # width + autofit layout makes Word stretch the table — and its existing
+    # column-width ratios — to exactly match the destination page, with no
+    # change to column proportions or cell content.
+    tblPr = cloned.find(f"{{{_W}}}tblPr")
+    if tblPr is not None:
+        for tag in ("tblW", "tblLayout"):
+            old = tblPr.find(f"{{{_W}}}{tag}")
+            if old is not None:
+                tblPr.remove(old)
+        tblW = OxmlElement("w:tblW")
+        tblW.set(qn("w:w"), "5000")
+        tblW.set(qn("w:type"), "pct")
+        tblPr.append(tblW)
+        tblLayout = OxmlElement("w:tblLayout")
+        tblLayout.set(qn("w:type"), "autofit")
+        tblPr.append(tblLayout)
 
     return cloned
 
@@ -1887,44 +1871,6 @@ def build_mop(
     doc  = Document(io.BytesIO(template_bytes))
     body = doc.element.body
     _update_header_date(doc, today_str)
-
-    # ── Properly center the cover-page "METHOD OF PROCEDURE" heading ─────────
-    # Some templates fake centering with a long run of leading spaces, which
-    # only looks right at one specific page width/font and breaks the
-    # moment the page width changes. Use real paragraph alignment instead.
-    for _p in doc.paragraphs[:20]:
-        if "METHOD OF PROCEDURE" in _p.text.upper() and len(_p.text.strip()) < 40:
-            _p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            if _p.runs:
-                _p.runs[0].text = _p.runs[0].text.lstrip()
-                _p.runs[-1].text = _p.runs[-1].text.rstrip()
-            break
-
-    # ── Force portrait orientation ──────────────────────────────────────────
-    # Generated MOPs should always be portrait, regardless of whichever
-    # template (landscape or portrait) was loaded. Only page_width/height +
-    # the orientation flag are swapped — margins are left exactly as
-    # authored in the template, since they may be deliberately tuned
-    # (e.g. a tall top margin for a letterhead banner).
-    _orientation_swapped = False
-    for _sec in doc.sections:
-        if _sec.orientation == WD_ORIENT.LANDSCAPE or _sec.page_width > _sec.page_height:
-            _w, _h = _sec.page_width, _sec.page_height
-            _sec.page_width, _sec.page_height = _h, _w
-            _sec.orientation = WD_ORIENT.PORTRAIT
-            _orientation_swapped = True
-
-    # A header/footer/cover-page table already in the template (not one we
-    # clone in later) carries an absolute width sized for the page it was
-    # authored on. If we just narrowed the page (landscape → portrait),
-    # those static tables would now overflow the new, narrower width —
-    # so re-fit them too, the same way cloned tables get re-fit.
-    if _orientation_swapped:
-        for _sec in doc.sections:
-            for _tbl in list(_sec.header.tables) + list(_sec.footer.tables):
-                _force_table_full_width(_tbl._tbl)
-        for _tbl in doc.tables:
-            _force_table_full_width(_tbl._tbl)
 
     # ── Derive real page-fit limits for inserted images from the actual
     # template page size/margins/orientation (not a generic hardcoded guess).
@@ -2162,15 +2108,7 @@ def build_mop(
             for p_elem in all_sop_elems:
                 if p_elem.tag.split("}")[-1] == "tbl": continue
                 text  = "".join(t.text or "" for t in p_elem.findall(".//" + qn("w:t")))
-                # Our own generated caption ("...copied from Activity MOP")
-                # only ever appears right after a real image was already
-                # placed in a previous run. If this Solution Document is
-                # itself a prior output being re-fed as input, that caption
-                # text would otherwise look identical to an unresolved
-                # "[Screenshot]"-style placeholder and get a second,
-                # duplicate image inserted on top of it.
-                is_own_caption = "copied from activity mop" in text.lower()
-                is_ph = bool(IMAGE_PLACEHOLDER_RE.search(text)) and not is_own_caption
+                is_ph = bool(IMAGE_PLACEHOLDER_RE.search(text))
                 if is_ph and media_idx < len(media_queue):
                     media_item = media_queue[media_idx]; media_idx += 1
                     if media_item.kind == "image":
@@ -2204,25 +2142,9 @@ def build_mop(
                         media_item.injected = True; injected_count += 1
 
             # 4. Remaining unmatched media → append at SOP end
-            # Image items are skipped here when mop_sections already provided
-            # a verbatim clone of the Activity MOP's own "sop" content (step 1
-            # above) — that clone already carries these same images at their
-            # original, correct position right next to their related
-            # instruction text. Re-adding them here duplicated the image AND
-            # could collide the auto-generated drawing ID of this fresh copy
-            # with the ID already used by the verbatim clone — that ID
-            # collision is what was producing "Word found unreadable content"
-            # when opening the file.
-            # Attachments (Excel/OLE) are NOT duplicated by the verbatim
-            # clone (their relationship can't survive a raw XML copy into a
-            # different package), so they still need to go through here
-            # regardless of mop_sections content.
-            _mop_sop_has_content = bool((mop_sections or {}).get("sop"))
             while media_idx < len(media_queue):
                 m = media_queue[media_idx]; media_idx += 1
                 if m.kind == "image":
-                    if _mop_sop_has_content:
-                        continue  # already shown via the verbatim Activity MOP clone
                     try:
                         img_xml = _make_image_xml(doc, m.blob,
                                                    max_w=IMG_MAX_W, max_h=IMG_MAX_H)
@@ -2303,27 +2225,6 @@ def build_mop(
             _pBdr = _pPr.find("{%s}pBdr" % _W_FINAL)
             if _pBdr is not None:
                 _pPr.remove(_pBdr)
-
-    # ── Force-unique wp:docPr ids on every inline drawing ──────────────────────
-    # Cloned content (verbatim Activity MOP / Solution Doc paragraphs) keeps
-    # whatever docPr id existed in its source document. If the same source
-    # image ends up cloned from more than one place, two drawings can share
-    # an id — Word treats that as corrupt content ("Word found unreadable
-    # content..." on open). Renumber every docPr in the body to a guaranteed
-    # -unique value as a final safety net, regardless of which insertion
-    # path produced it.
-    _WP_NS = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
-    _seen_docpr_ids = set()
-    _next_docpr_id  = 1
-    for _docpr in doc.element.body.iter(f"{{{_WP_NS}}}docPr"):
-        _cur = _docpr.get("id")
-        if _cur is None or _cur in _seen_docpr_ids:
-            while str(_next_docpr_id) in _seen_docpr_ids:
-                _next_docpr_id += 1
-            _docpr.set("id", str(_next_docpr_id))
-            _seen_docpr_ids.add(str(_next_docpr_id))
-        else:
-            _seen_docpr_ids.add(_cur)
 
     # Save base document
     buf = io.BytesIO()
