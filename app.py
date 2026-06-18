@@ -29,6 +29,7 @@ import streamlit as st
 from docx import Document
 from docx.shared import Pt, RGBColor, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.section import WD_ORIENT
 from docx.oxml.ns import qn, nsmap
 from docx.oxml import OxmlElement
 
@@ -578,7 +579,8 @@ MOP_HEADING_MAP = [
     ("pre-requisite",                "prerequisites"),
     ("prerequisite",                 "prerequisites"),
     ("precondition",                 "prerequisites"),
-    ("requirement",                  "prerequisites"),
+    ("requirement",                  "acceptance_criteria"),
+    ("benefit",                      "objective"),
     ("inventory",                    "inventory_details"),
     ("node detail",                  "inventory_details"),
     ("equipment",                    "inventory_details"),
@@ -1452,9 +1454,10 @@ def _fitted_width_inches(img_bytes: bytes, max_w: float = 5.5, max_h: float = 8.
         return max_w
 
 
-def _make_image_xml(doc: Document, img_bytes: bytes, width_inches=None):
+def _make_image_xml(doc: Document, img_bytes: bytes, width_inches=None,
+                     max_w: float = 5.5, max_h: float = 6.5):
     if width_inches is None:
-        width_inches = _fitted_width_inches(img_bytes)
+        width_inches = _fitted_width_inches(img_bytes, max_w=max_w, max_h=max_h)
     tmp_p = doc.add_paragraph()
     run   = tmp_p.add_run()
     run.add_picture(io.BytesIO(img_bytes), width=Inches(width_inches))
@@ -1636,7 +1639,40 @@ def _import_numbering_defs(src_bytes: bytes, template_doc: Document) -> dict:
     return num_map
 
 
-def _clone_para(src_elem, num_map: dict = None, full_para_text: str = None):
+def _resize_inline_images(cloned_elem, max_w_in: float = 5.5, max_h_in: float = 6.5):
+    """
+    Rescale any inline picture inside a cloned paragraph so it fits within
+    max_w_in x max_h_in, preserving aspect ratio. Only shrinks - never
+    enlarges. Updates both wp:extent (drawing frame) and the matching
+    a:ext inside the picture's xfrm so Word renders them consistently.
+    """
+    _WP = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+    _A  = "http://schemas.openxmlformats.org/drawingml/2006/main"
+    for inline in (cloned_elem.findall(f".//{{{_WP}}}inline")
+                   + cloned_elem.findall(f".//{{{_WP}}}anchor")):
+        ext = inline.find(f"{{{_WP}}}extent")
+        if ext is None:
+            continue
+        try:
+            cx = int(ext.get("cx")); cy = int(ext.get("cy"))
+        except (TypeError, ValueError):
+            continue
+        if cx <= 0 or cy <= 0:
+            continue
+        w_in, h_in = cx / 914400, cy / 914400
+        if w_in <= max_w_in and h_in <= max_h_in:
+            continue  # already fits — leave untouched
+        aspect    = cx / cy
+        new_w_in  = min(max_w_in, max_h_in * aspect)
+        new_h_in  = new_w_in / aspect
+        new_cx, new_cy = int(new_w_in * 914400), int(new_h_in * 914400)
+        ext.set("cx", str(new_cx)); ext.set("cy", str(new_cy))
+        for xfrm_ext in inline.findall(f".//{{{_A}}}ext"):
+            xfrm_ext.set("cx", str(new_cx)); xfrm_ext.set("cy", str(new_cy))
+
+
+def _clone_para(src_elem, num_map: dict = None, full_para_text: str = None,
+                 max_img_w_in: float = 5.5, max_img_h_in: float = 6.5):
     """
     Deep-clone a paragraph applying MOP house style.
     num_map: remaps source numIds to imported IDs so numbering format is
@@ -1729,7 +1765,39 @@ def _clone_para(src_elem, num_map: dict = None, full_para_text: str = None):
                     rpr.remove(b_el)
             for bcs in rpr.findall(f"{{{_W}}}bCs"): rpr.remove(bcs)
 
+    _resize_inline_images(cloned, max_w_in=max_img_w_in, max_h_in=max_img_h_in)
+
     return cloned
+
+
+def _force_table_full_width(tbl_elem):
+    """
+    Set a table to occupy 100% of the destination page's text width,
+    preserving its existing column-ratio proportions exactly.
+    Uses tblLayout="fixed" (not "autofit") because "autofit" tells
+    Word/LibreOffice to size columns off cell *content* instead of the
+    declared percentage — which left short-content tables (e.g. a 2-column
+    table with just "FAN"/"Alarm Name") rendering narrower than the page
+    even with tblW set to 100%. "fixed" honours the percentage width
+    literally and distributes it across columns using their original
+    relative ratios.
+    """
+    _W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    tblPr = tbl_elem.find(f"{{{_W}}}tblPr")
+    if tblPr is None:
+        tblPr = OxmlElement("w:tblPr")
+        tbl_elem.insert(0, tblPr)
+    for tag in ("tblW", "tblLayout"):
+        old = tblPr.find(f"{{{_W}}}{tag}")
+        if old is not None:
+            tblPr.remove(old)
+    tblW = OxmlElement("w:tblW")
+    tblW.set(qn("w:w"), "5000")
+    tblW.set(qn("w:type"), "pct")
+    tblPr.append(tblW)
+    tblLayout = OxmlElement("w:tblLayout")
+    tblLayout.set(qn("w:type"), "fixed")
+    tblPr.append(tblLayout)
 
 
 def _clone_table(src_tbl, num_map: dict = None):
@@ -1743,6 +1811,14 @@ def _clone_table(src_tbl, num_map: dict = None):
         _normalise_run(rpr)
         for b  in rpr.findall(f"{{{_W}}}b"):   rpr.remove(b)
         for bc in rpr.findall(f"{{{_W}}}bCs"): rpr.remove(bc)
+
+    # ── Make table fill 100% of the destination page's text width ──────────
+    # Source tables (Solution Doc / Activity MOP) carry an absolute width
+    # (dxa) sized for whichever page they were authored on. Cloning that
+    # verbatim into a template with a different page size/orientation makes
+    # the table look too narrow (or overflow). See _force_table_full_width.
+    _force_table_full_width(cloned)
+
     return cloned
 
 
@@ -1811,6 +1887,49 @@ def build_mop(
     doc  = Document(io.BytesIO(template_bytes))
     body = doc.element.body
     _update_header_date(doc, today_str)
+
+    # ── Force portrait orientation ──────────────────────────────────────────
+    # Generated MOPs should always be portrait, regardless of whichever
+    # template (landscape or portrait) was loaded. Only page_width/height +
+    # the orientation flag are swapped — margins are left exactly as
+    # authored in the template, since they may be deliberately tuned
+    # (e.g. a tall top margin for a letterhead banner).
+    _orientation_swapped = False
+    for _sec in doc.sections:
+        if _sec.orientation == WD_ORIENT.LANDSCAPE or _sec.page_width > _sec.page_height:
+            _w, _h = _sec.page_width, _sec.page_height
+            _sec.page_width, _sec.page_height = _h, _w
+            _sec.orientation = WD_ORIENT.PORTRAIT
+            _orientation_swapped = True
+
+    # A header/footer/cover-page table already in the template (not one we
+    # clone in later) carries an absolute width sized for the page it was
+    # authored on. If we just narrowed the page (landscape → portrait),
+    # those static tables would now overflow the new, narrower width —
+    # so re-fit them too, the same way cloned tables get re-fit.
+    if _orientation_swapped:
+        for _sec in doc.sections:
+            for _tbl in list(_sec.header.tables) + list(_sec.footer.tables):
+                _force_table_full_width(_tbl._tbl)
+        for _tbl in doc.tables:
+            _force_table_full_width(_tbl._tbl)
+
+    # ── Derive real page-fit limits for inserted images from the actual
+    # template page size/margins/orientation (not a generic hardcoded guess).
+    # A landscape template with a tall top margin (letterhead/branding) can
+    # have very little usable height — sizing purely off a portrait
+    # assumption would still overflow such templates.
+    try:
+        _sect    = doc.sections[0]
+        _usable_w_in = (_sect.page_width.twips - _sect.left_margin.twips
+                        - _sect.right_margin.twips) / 1440
+        _usable_h_in = (_sect.page_height.twips - _sect.top_margin.twips
+                         - _sect.bottom_margin.twips) / 1440
+        IMG_MAX_W = max(min(5.5, _usable_w_in - 0.3), 2.0)
+        # Leave headroom for heading text above + caption below the image.
+        IMG_MAX_H = max(_usable_h_in * 0.75, 2.0)
+    except Exception:
+        IMG_MAX_W, IMG_MAX_H = 5.5, 6.5
 
     # ── Strip numPr from Heading2–9 style definitions in template ────────────
     # Template has numId=1, ilvl=1..8 in Heading2–9 styles which causes Word
@@ -2002,7 +2121,8 @@ def build_mop(
                 full_txt = "".join(
                     t.text or "" for t in elem.findall(".//" + qn("w:t"))
                 ).strip()
-                cl = _clone_para(elem, num_map=nm, full_para_text=full_txt)
+                cl = _clone_para(elem, num_map=nm, full_para_text=full_txt,
+                                  max_img_w_in=IMG_MAX_W, max_img_h_in=IMG_MAX_H)
                 _insert_after(cur, cl)
                 return cl
 
@@ -2035,7 +2155,8 @@ def build_mop(
                     media_item = media_queue[media_idx]; media_idx += 1
                     if media_item.kind == "image":
                         try:
-                            img_xml = _make_image_xml(doc, media_item.blob)
+                            img_xml = _make_image_xml(doc, media_item.blob,
+                                                       max_w=IMG_MAX_W, max_h=IMG_MAX_H)
                             _insert_after(cursor, img_xml); cursor = img_xml
                             cap = _make_caption_xml()
                             _insert_after(cursor, cap); cursor = cap
@@ -2067,7 +2188,8 @@ def build_mop(
                 m = media_queue[media_idx]; media_idx += 1
                 if m.kind == "image":
                     try:
-                        img_xml = _make_image_xml(doc, m.blob)
+                        img_xml = _make_image_xml(doc, m.blob,
+                                                   max_w=IMG_MAX_W, max_h=IMG_MAX_H)
                         _insert_after(cursor, img_xml); cursor = img_xml
                         cap = _make_caption_xml()
                         _insert_after(cursor, cap); cursor = cap
