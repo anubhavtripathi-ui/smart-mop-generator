@@ -29,6 +29,7 @@ import streamlit as st
 from docx import Document
 from docx.shared import Pt, RGBColor, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.section import WD_ORIENT
 from docx.oxml.ns import qn, nsmap
 from docx.oxml import OxmlElement
 
@@ -1769,6 +1770,36 @@ def _clone_para(src_elem, num_map: dict = None, full_para_text: str = None,
     return cloned
 
 
+def _force_table_full_width(tbl_elem):
+    """
+    Set a table to occupy 100% of the destination page's text width,
+    preserving its existing column-ratio proportions exactly.
+    Uses tblLayout="fixed" (not "autofit") because "autofit" tells
+    Word/LibreOffice to size columns off cell *content* instead of the
+    declared percentage — which left short-content tables (e.g. a 2-column
+    table with just "FAN"/"Alarm Name") rendering narrower than the page
+    even with tblW set to 100%. "fixed" honours the percentage width
+    literally and distributes it across columns using their original
+    relative ratios.
+    """
+    _W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    tblPr = tbl_elem.find(f"{{{_W}}}tblPr")
+    if tblPr is None:
+        tblPr = OxmlElement("w:tblPr")
+        tbl_elem.insert(0, tblPr)
+    for tag in ("tblW", "tblLayout"):
+        old = tblPr.find(f"{{{_W}}}{tag}")
+        if old is not None:
+            tblPr.remove(old)
+    tblW = OxmlElement("w:tblW")
+    tblW.set(qn("w:w"), "5000")
+    tblW.set(qn("w:type"), "pct")
+    tblPr.append(tblW)
+    tblLayout = OxmlElement("w:tblLayout")
+    tblLayout.set(qn("w:type"), "fixed")
+    tblPr.append(tblLayout)
+
+
 def _clone_table(src_tbl, num_map: dict = None):
     """Deep-clone a table normalising cell run formatting to house style."""
     cloned = deepcopy(src_tbl)
@@ -1785,23 +1816,8 @@ def _clone_table(src_tbl, num_map: dict = None):
     # Source tables (Solution Doc / Activity MOP) carry an absolute width
     # (dxa) sized for whichever page they were authored on. Cloning that
     # verbatim into a template with a different page size/orientation makes
-    # the table look too narrow (or overflow). Switching to a percentage
-    # width + autofit layout makes Word stretch the table — and its existing
-    # column-width ratios — to exactly match the destination page, with no
-    # change to column proportions or cell content.
-    tblPr = cloned.find(f"{{{_W}}}tblPr")
-    if tblPr is not None:
-        for tag in ("tblW", "tblLayout"):
-            old = tblPr.find(f"{{{_W}}}{tag}")
-            if old is not None:
-                tblPr.remove(old)
-        tblW = OxmlElement("w:tblW")
-        tblW.set(qn("w:w"), "5000")
-        tblW.set(qn("w:type"), "pct")
-        tblPr.append(tblW)
-        tblLayout = OxmlElement("w:tblLayout")
-        tblLayout.set(qn("w:type"), "autofit")
-        tblPr.append(tblLayout)
+    # the table look too narrow (or overflow). See _force_table_full_width.
+    _force_table_full_width(cloned)
 
     return cloned
 
@@ -1871,6 +1887,32 @@ def build_mop(
     doc  = Document(io.BytesIO(template_bytes))
     body = doc.element.body
     _update_header_date(doc, today_str)
+
+    # ── Force portrait orientation ──────────────────────────────────────────
+    # Generated MOPs should always be portrait, regardless of whichever
+    # template (landscape or portrait) was loaded. Only page_width/height +
+    # the orientation flag are swapped — margins are left exactly as
+    # authored in the template, since they may be deliberately tuned
+    # (e.g. a tall top margin for a letterhead banner).
+    _orientation_swapped = False
+    for _sec in doc.sections:
+        if _sec.orientation == WD_ORIENT.LANDSCAPE or _sec.page_width > _sec.page_height:
+            _w, _h = _sec.page_width, _sec.page_height
+            _sec.page_width, _sec.page_height = _h, _w
+            _sec.orientation = WD_ORIENT.PORTRAIT
+            _orientation_swapped = True
+
+    # A header/footer/cover-page table already in the template (not one we
+    # clone in later) carries an absolute width sized for the page it was
+    # authored on. If we just narrowed the page (landscape → portrait),
+    # those static tables would now overflow the new, narrower width —
+    # so re-fit them too, the same way cloned tables get re-fit.
+    if _orientation_swapped:
+        for _sec in doc.sections:
+            for _tbl in list(_sec.header.tables) + list(_sec.footer.tables):
+                _force_table_full_width(_tbl._tbl)
+        for _tbl in doc.tables:
+            _force_table_full_width(_tbl._tbl)
 
     # ── Derive real page-fit limits for inserted images from the actual
     # template page size/margins/orientation (not a generic hardcoded guess).
