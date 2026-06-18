@@ -525,8 +525,17 @@ def extract_media_from_activity_mop(mop_bytes: bytes) -> list:
                     continue
                 blob, ext, ct = img_rel_map[embed]
                 if ext.lower() in ("emf", "wmf"):
-                    continue
-                if len(blob) < 2000:
+                    # Small EMF/WMF blobs are almost always decorative
+                    # icons/logos (e.g. OLE preview icons) - safe to skip.
+                    # Larger ones are likely a real pasted flowchart/diagram;
+                    # python-docx can't render EMF/WMF directly, so we still
+                    # let it flow through as a MediaItem - the existing
+                    # insertion try/except will catch the failure and emit
+                    # a "manual insertion needed" notice instead of the
+                    # image silently disappearing with no trace.
+                    if len(blob) < 3000:
+                        continue
+                elif len(blob) < 2000:
                     continue
                 if embed in {m.rId for m in media_items}:
                     continue
@@ -1424,7 +1433,28 @@ def _insert_after(anchor: etree._Element, new_elem: etree._Element):
     parent.insert(idx + 1, new_elem)
 
 
-def _make_image_xml(doc: Document, img_bytes: bytes, width_inches=5.5):
+def _fitted_width_inches(img_bytes: bytes, max_w: float = 5.5, max_h: float = 8.0) -> float:
+    """
+    Pick an insertion width (inches) so the image fits within max_w x max_h,
+    preserving its native aspect ratio. Prevents tall/portrait images
+    (e.g. vertical flowcharts) from overflowing past a single page when
+    forced to a fixed width. Falls back to max_w if dimensions can't be read.
+    """
+    try:
+        from docx.image.image import Image as _DocxImage
+        im = _DocxImage.from_blob(img_bytes)
+        if not im.px_width or not im.px_height:
+            return max_w
+        aspect = im.px_width / im.px_height  # width / height
+        width_in = min(max_w, max_h * aspect)
+        return max(width_in, 1.0)
+    except Exception:
+        return max_w
+
+
+def _make_image_xml(doc: Document, img_bytes: bytes, width_inches=None):
+    if width_inches is None:
+        width_inches = _fitted_width_inches(img_bytes)
     tmp_p = doc.add_paragraph()
     run   = tmp_p.add_run()
     run.add_picture(io.BytesIO(img_bytes), width=Inches(width_inches))
@@ -1906,7 +1936,7 @@ def build_mop(
             body.remove(child)   # blank Heading1 = template separator line
             continue
         key = normalize_heading(text)
-        if key and key != "connectivity_diagram":
+        if key:
             _apply_heading_color(child)
             ordered_sections.append((child, key))
 
@@ -2426,8 +2456,7 @@ with col_right:
             st.session_state["sections"]          = sections
             st.session_state["filled"]            = sum(1 for k in SECTION_KEYS[:-1] if sections.get(k))
             st.session_state["images_n"]          = len([m for m in media_items if m.kind == "image"])
-            st.session_state["total_n"]           = sum(len(v) for k, v in sections.items()
-                                                         if k != "connectivity_diagram")
+            st.session_state["total_n"]           = sum(len(v) for k, v in sections.items())
             st.session_state["failed_media"]      = failed_media
             st.session_state["injected_media"]    = injected_count
             st.session_state["comments_injected"] = len(c_injected)
