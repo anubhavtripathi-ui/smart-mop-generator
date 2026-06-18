@@ -1888,6 +1888,18 @@ def build_mop(
     body = doc.element.body
     _update_header_date(doc, today_str)
 
+    # ── Properly center the cover-page "METHOD OF PROCEDURE" heading ─────────
+    # Some templates fake centering with a long run of leading spaces, which
+    # only looks right at one specific page width/font and breaks the
+    # moment the page width changes. Use real paragraph alignment instead.
+    for _p in doc.paragraphs[:20]:
+        if "METHOD OF PROCEDURE" in _p.text.upper() and len(_p.text.strip()) < 40:
+            _p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            if _p.runs:
+                _p.runs[0].text = _p.runs[0].text.lstrip()
+                _p.runs[-1].text = _p.runs[-1].text.rstrip()
+            break
+
     # ── Force portrait orientation ──────────────────────────────────────────
     # Generated MOPs should always be portrait, regardless of whichever
     # template (landscape or portrait) was loaded. Only page_width/height +
@@ -2150,7 +2162,15 @@ def build_mop(
             for p_elem in all_sop_elems:
                 if p_elem.tag.split("}")[-1] == "tbl": continue
                 text  = "".join(t.text or "" for t in p_elem.findall(".//" + qn("w:t")))
-                is_ph = bool(IMAGE_PLACEHOLDER_RE.search(text))
+                # Our own generated caption ("...copied from Activity MOP")
+                # only ever appears right after a real image was already
+                # placed in a previous run. If this Solution Document is
+                # itself a prior output being re-fed as input, that caption
+                # text would otherwise look identical to an unresolved
+                # "[Screenshot]"-style placeholder and get a second,
+                # duplicate image inserted on top of it.
+                is_own_caption = "copied from activity mop" in text.lower()
+                is_ph = bool(IMAGE_PLACEHOLDER_RE.search(text)) and not is_own_caption
                 if is_ph and media_idx < len(media_queue):
                     media_item = media_queue[media_idx]; media_idx += 1
                     if media_item.kind == "image":
@@ -2184,9 +2204,25 @@ def build_mop(
                         media_item.injected = True; injected_count += 1
 
             # 4. Remaining unmatched media → append at SOP end
+            # Image items are skipped here when mop_sections already provided
+            # a verbatim clone of the Activity MOP's own "sop" content (step 1
+            # above) — that clone already carries these same images at their
+            # original, correct position right next to their related
+            # instruction text. Re-adding them here duplicated the image AND
+            # could collide the auto-generated drawing ID of this fresh copy
+            # with the ID already used by the verbatim clone — that ID
+            # collision is what was producing "Word found unreadable content"
+            # when opening the file.
+            # Attachments (Excel/OLE) are NOT duplicated by the verbatim
+            # clone (their relationship can't survive a raw XML copy into a
+            # different package), so they still need to go through here
+            # regardless of mop_sections content.
+            _mop_sop_has_content = bool((mop_sections or {}).get("sop"))
             while media_idx < len(media_queue):
                 m = media_queue[media_idx]; media_idx += 1
                 if m.kind == "image":
+                    if _mop_sop_has_content:
+                        continue  # already shown via the verbatim Activity MOP clone
                     try:
                         img_xml = _make_image_xml(doc, m.blob,
                                                    max_w=IMG_MAX_W, max_h=IMG_MAX_H)
@@ -2267,6 +2303,27 @@ def build_mop(
             _pBdr = _pPr.find("{%s}pBdr" % _W_FINAL)
             if _pBdr is not None:
                 _pPr.remove(_pBdr)
+
+    # ── Force-unique wp:docPr ids on every inline drawing ──────────────────────
+    # Cloned content (verbatim Activity MOP / Solution Doc paragraphs) keeps
+    # whatever docPr id existed in its source document. If the same source
+    # image ends up cloned from more than one place, two drawings can share
+    # an id — Word treats that as corrupt content ("Word found unreadable
+    # content..." on open). Renumber every docPr in the body to a guaranteed
+    # -unique value as a final safety net, regardless of which insertion
+    # path produced it.
+    _WP_NS = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+    _seen_docpr_ids = set()
+    _next_docpr_id  = 1
+    for _docpr in doc.element.body.iter(f"{{{_WP_NS}}}docPr"):
+        _cur = _docpr.get("id")
+        if _cur is None or _cur in _seen_docpr_ids:
+            while str(_next_docpr_id) in _seen_docpr_ids:
+                _next_docpr_id += 1
+            _docpr.set("id", str(_next_docpr_id))
+            _seen_docpr_ids.add(str(_next_docpr_id))
+        else:
+            _seen_docpr_ids.add(_cur)
 
     # Save base document
     buf = io.BytesIO()
