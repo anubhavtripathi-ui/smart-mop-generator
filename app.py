@@ -1672,13 +1672,44 @@ def _resize_inline_images(cloned_elem, max_w_in: float = 5.5, max_h_in: float = 
 
 
 def _clone_para(src_elem, num_map: dict = None, full_para_text: str = None,
-                 max_img_w_in: float = 5.5, max_img_h_in: float = 6.5):
+                 max_img_w_in: float = 5.5, max_img_h_in: float = 6.5,
+                 strip_drawings: bool = False):
     """
     Deep-clone a paragraph applying MOP house style.
     num_map: remaps source numIds to imported IDs so numbering format is
              preserved exactly from the source document.
+    strip_drawings: if True, remove all w:drawing elements from the clone.
+                    Used for MOP paragraphs whose images are handled separately
+                    via the MediaItem queue to prevent image duplication.
     """
     cloned = deepcopy(src_elem)
+
+    # ── Strip inline drawings from MOP-sourced paragraphs ─────────────────────
+    # When a MOP paragraph that contains an inline image is cloned via deepcopy,
+    # the <w:drawing> XML (with its rId relationship) is carried verbatim into
+    # the output document body.  At the same time, extract_media_from_activity_mop
+    # has already extracted the same image blob into the MediaItem queue, which
+    # later re-inserts it via _make_image_xml / _make_image_para.
+    # The result is the image appearing TWICE — once from the cloned paragraph
+    # XML and once from the media queue re-insertion.
+    # Fix: when strip_drawings=True, remove <w:drawing> runs entirely so only
+    # the media-queue path produces the image in the document.
+    if strip_drawings:
+        _WD = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        _WP = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+        # Remove runs that contain only a drawing (no text)
+        for run in list(cloned.findall(f".//{{{_WD}}}r")):
+            if run.find(f"{{{_WD}}}drawing") is not None:
+                run_texts = "".join(t.text or "" for t in run.findall(f"{{{_WD}}}t")).strip()
+                if not run_texts:
+                    parent = run.getparent()
+                    if parent is not None:
+                        parent.remove(run)
+        # Also strip any stray <w:drawing> that sits directly inside a run
+        for drawing in list(cloned.findall(f".//{{{_WD}}}drawing")):
+            parent = drawing.getparent()
+            if parent is not None:
+                parent.remove(drawing)
     _W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 
     pStyle_el  = cloned.find(".//" + qn("w:pStyle"))
@@ -1999,6 +2030,15 @@ def build_mop(
             continue
         se = child.find(".//" + qn("w:pStyle"))
         if se is not None and se.get(qn("w:val")) == "Title":
+            # Force center alignment on the Title paragraph itself
+            pPr_title = child.find(qn("w:pPr"))
+            if pPr_title is None:
+                pPr_title = OxmlElement("w:pPr"); child.insert(0, pPr_title)
+            jc_title = pPr_title.find(qn("w:jc"))
+            if jc_title is None:
+                jc_title = OxmlElement("w:jc"); pPr_title.append(jc_title)
+            jc_title.set(qn("w:val"), "center")
+
             sub_e = OxmlElement("w:p")
             pPr = OxmlElement("w:pPr")
             jc  = OxmlElement("w:jc"); jc.set(qn("w:val"), "center")
@@ -2121,88 +2161,36 @@ def build_mop(
                 full_txt = "".join(
                     t.text or "" for t in elem.findall(".//" + qn("w:t"))
                 ).strip()
+                # strip_drawings=True for MOP elements: images from MOP are
+                # re-inserted via the MediaItem queue to avoid duplication.
                 cl = _clone_para(elem, num_map=nm, full_para_text=full_txt,
-                                  max_img_w_in=IMG_MAX_W, max_img_h_in=IMG_MAX_H)
+                                  max_img_w_in=IMG_MAX_W, max_img_h_in=IMG_MAX_H,
+                                  strip_drawings=_is_mop and bool(media_items))
                 _insert_after(cur, cl)
                 return cl
 
         if sec_key == "sop":
             seen_texts = set()
 
-            if mop_sections:
-                for elem in mop_sections.get("sop", []):
-                    txt = "".join(t.text or "" for t in elem.findall(".//" + qn("w:t"))).strip()
-                    if txt: seen_texts.add(txt.lower())
-                    cursor = _insert_elem(elem, cursor, _is_mop=True)
-
-            for p_elem in content_elems:
-                tag = p_elem.tag.split("}")[-1]
-                if tag == "tbl":
-                    cursor = _insert_elem(p_elem, cursor); continue
-                txt = "".join(t.text or "" for t in p_elem.findall(".//" + qn("w:t"))).strip()
-                if txt and txt.lower() in seen_texts: continue
-                if txt: seen_texts.add(txt.lower())
-                cursor = _insert_elem(p_elem, cursor)
-
-            # 3. Media at placeholder positions
-            # Re-scan all inserted elems to match placeholders
-            all_sop_elems = (mop_sections or {}).get("sop", []) + content_elems
-            for p_elem in all_sop_elems:
-                if p_elem.tag.split("}")[-1] == "tbl": continue
-                text  = "".join(t.text or "" for t in p_elem.findall(".//" + qn("w:t")))
-                is_ph = bool(IMAGE_PLACEHOLDER_RE.search(text))
-                if is_ph and media_idx < len(media_queue):
-                    media_item = media_queue[media_idx]; media_idx += 1
-                    if media_item.kind == "image":
-                        try:
-                            img_xml = _make_image_xml(doc, media_item.blob,
-                                                       max_w=IMG_MAX_W, max_h=IMG_MAX_H)
-                            _insert_after(cursor, img_xml); cursor = img_xml
-                            cap = _make_caption_xml()
-                            _insert_after(cursor, cap); cursor = cap
-                            media_item.injected = True; injected_count += 1
-                        except Exception as ex:
-                            media_item.inject_error = str(ex)
-                            # Use context_text (heading near the image) as description if available
-                            ctx = media_item.context_text
-                            if ctx and len(ctx) > 3:
-                                img_desc = f"Image: '{ctx[:60]}'"
-                            else:
-                                img_desc = f"Image #{media_item.position_index+1}"
-                            failed_media.append(img_desc)
-                            _insert_after(cursor, _make_notice_xml(img_desc))
-                            cursor = list(body)[-1]
-                    else:
-                        att_counter[0] += 1
-                        att_xml = _make_xml_para(
-                            doc,
-                            f"\U0001f4ce  ATTACHED FILE [{media_item.ext.upper()}]: "
-                            f"{media_item.display_name}  \u2014 embedded in document",
-                            bold=False, color_rgb="000000", size_pt=11)
-                        _insert_after(cursor, att_xml); cursor = att_xml
-                        pending_att.append((media_item, att_counter[0]))
-                        media_item.injected = True; injected_count += 1
-
-            # 4. Remaining unmatched media → append at SOP end
-            while media_idx < len(media_queue):
-                m = media_queue[media_idx]; media_idx += 1
+            # ── Helper to inject one MediaItem at the current cursor ──────────
+            def _inject_media_item(m, cur):
+                nonlocal injected_count
                 if m.kind == "image":
                     try:
                         img_xml = _make_image_xml(doc, m.blob,
                                                    max_w=IMG_MAX_W, max_h=IMG_MAX_H)
-                        _insert_after(cursor, img_xml); cursor = img_xml
+                        _insert_after(cur, img_xml); cur = img_xml
                         cap = _make_caption_xml()
-                        _insert_after(cursor, cap); cursor = cap
+                        _insert_after(cur, cap); cur = cap
                         m.injected = True; injected_count += 1
-                    except Exception:
+                    except Exception as ex:
+                        m.inject_error = str(ex)
                         ctx = m.context_text
-                        if ctx and len(ctx) > 3:
-                            img_desc = f"Image: '{ctx[:60]}'"
-                        else:
-                            img_desc = f"Image #{m.position_index+1}"
+                        img_desc = (f"Image: '{ctx[:60]}'" if ctx and len(ctx) > 3
+                                    else f"Image #{m.position_index+1}")
                         failed_media.append(img_desc)
-                        _insert_after(cursor, _make_notice_xml(img_desc))
-                        cursor = list(body)[-1]
+                        _insert_after(cur, _make_notice_xml(img_desc))
+                        cur = list(body)[-1]
                 else:
                     att_counter[0] += 1
                     att_xml = _make_xml_para(
@@ -2210,9 +2198,63 @@ def build_mop(
                         f"\U0001f4ce  ATTACHED FILE [{m.ext.upper()}]: "
                         f"{m.display_name}  \u2014 embedded in document",
                         bold=False, color_rgb="000000", size_pt=11)
-                    _insert_after(cursor, att_xml); cursor = att_xml
+                    _insert_after(cur, att_xml); cur = att_xml
                     pending_att.append((m, att_counter[0]))
                     m.injected = True; injected_count += 1
+                return cur
+
+            # ── NS constants for drawing detection ────────────────────────────
+            _WD_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
+            # ── Step A: Insert MOP content, injecting images at their original
+            #    position (right after the para where the drawing was stripped).
+            #    Each MOP paragraph that HAD a <w:drawing> in the source is
+            #    matched 1-to-1 with the next MediaItem from the queue.
+            if mop_sections:
+                for elem in mop_sections.get("sop", []):
+                    tag = elem.tag.split("}")[-1]
+                    if tag == "tbl":
+                        cursor = _insert_elem(elem, cursor, _is_mop=True)
+                        continue
+                    txt = "".join(t.text or "" for t in elem.findall(".//" + qn("w:t"))).strip()
+                    if txt: seen_texts.add(txt.lower())
+
+                    # Check if this source element contained an inline drawing
+                    had_drawing = bool(elem.findall(
+                        f".//{{{_WD_NS}}}drawing"))
+
+                    cursor = _insert_elem(elem, cursor, _is_mop=True)
+
+                    # If it had a drawing, inject the next media item HERE
+                    # (the drawing XML was stripped from the clone by _clone_para,
+                    #  so the image must come from the media queue instead)
+                    if had_drawing and media_idx < len(media_queue):
+                        media_item = media_queue[media_idx]; media_idx += 1
+                        cursor = _inject_media_item(media_item, cursor)
+
+            # ── Step B: Insert solution-doc SOP content (deduped) ────────────
+            for p_elem in content_elems:
+                tag = p_elem.tag.split("}")[-1]
+                if tag == "tbl":
+                    cursor = _insert_elem(p_elem, cursor); continue
+                txt = "".join(t.text or "" for t in p_elem.findall(".//" + qn("w:t"))).strip()
+
+                # Check for [IMAGE] placeholder in solution doc content
+                is_ph = bool(IMAGE_PLACEHOLDER_RE.search(txt))
+
+                if txt and txt.lower() in seen_texts: continue
+                if txt: seen_texts.add(txt.lower())
+                cursor = _insert_elem(p_elem, cursor)
+
+                # Inject media at solution-doc placeholders (when no MOP uploaded)
+                if is_ph and not mop_sections and media_idx < len(media_queue):
+                    media_item = media_queue[media_idx]; media_idx += 1
+                    cursor = _inject_media_item(media_item, cursor)
+
+            # ── Step C: Remaining unmatched media → append at SOP end ─────────
+            while media_idx < len(media_queue):
+                m = media_queue[media_idx]; media_idx += 1
+                cursor = _inject_media_item(m, cursor)
 
 
         elif sec_key == "acceptance_criteria":
