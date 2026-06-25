@@ -1873,11 +1873,11 @@ _ASCII_FLOW_RE = re.compile(
     r'|\[.*?\].*?[-─→▼▶]'       # [Box] → style
     r'|[-─→▼▶].*?\[.*?\]'       # → [Box] style
     r'|\(\s*.+?\s*\).*?[-→▼]'   # (diamond) → style
-    r'|[-→▼].*?\(\s*.+?\s*\)',   # → (diamond) style
+    r'|[-→▼].*?\(\s*.+?\s*\)'   # → (diamond) style
     r'|<.*?>.*?[-→▼▶]'          # <decision> arrow style
     r'|YES\s*[-→▼]|NO\s*[-→▼]'  # YES/NO branches
     r'|[-→▼]\s*YES|[-→▼]\s*NO', # arrow then YES/NO
-    re.IGNORECASE | re.MULTILINE
+    flags=re.IGNORECASE | re.MULTILINE
 )
 
 # Detect if a single line of text is part of an ASCII diagram
