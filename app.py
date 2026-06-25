@@ -2030,50 +2030,14 @@ def build_mop(
             continue
         se = child.find(".//" + qn("w:pStyle"))
         if se is not None and se.get(qn("w:val")) == "Title":
-            # Force center alignment on the Title paragraph itself.
-            # Strategy: Word resolves paragraph alignment from (in priority order):
-            #   1. Direct paragraph property <w:jc> inside <w:pPr>
-            #   2. The named style's <w:jc>
-            # The template's "Title" style has right-alignment baked in.
-            # To override it we must:
-            #   a) Remove <w:pStyle> from pPr so the style's jc doesn't apply, OR
-            #   b) Set <w:jc center> directly AND clear any indentation that fakes right-align.
-            # We use (b) to keep font/size from the style, but strip jc+ind overrides.
+            # Force center alignment on the Title paragraph itself
             pPr_title = child.find(qn("w:pPr"))
             if pPr_title is None:
-                pPr_title = OxmlElement("w:pPr")
-                child.insert(0, pPr_title)
-
-            # Remove existing <w:jc> and <w:ind> — both can cause right-shift
-            for tag_to_remove in (qn("w:jc"), qn("w:ind")):
-                existing = pPr_title.find(tag_to_remove)
-                if existing is not None:
-                    pPr_title.remove(existing)
-
-            # Insert <w:jc val="center"> as the FIRST child after <w:pStyle>
-            # so it takes precedence and is unambiguous
-            jc_title = OxmlElement("w:jc")
+                pPr_title = OxmlElement("w:pPr"); child.insert(0, pPr_title)
+            jc_title = pPr_title.find(qn("w:jc"))
+            if jc_title is None:
+                jc_title = OxmlElement("w:jc"); pPr_title.append(jc_title)
             jc_title.set(qn("w:val"), "center")
-            # Find position after w:pStyle to insert jc right after it
-            pStyle_elem = pPr_title.find(qn("w:pStyle"))
-            if pStyle_elem is not None:
-                insert_idx = list(pPr_title).index(pStyle_elem) + 1
-                pPr_title.insert(insert_idx, jc_title)
-            else:
-                pPr_title.insert(0, jc_title)
-
-            # Also zero out indentation at paragraph level to prevent right-shift
-            ind_elem = OxmlElement("w:ind")
-            ind_elem.set(qn("w:left"), "0")
-            ind_elem.set(qn("w:right"), "0")
-            ind_elem.set(qn("w:firstLine"), "0")
-            pPr_title.append(ind_elem)
-
-            # Force center on each run's rPr (belt-and-suspenders for complex templates)
-            for run in child.findall(".//" + qn("w:r")):
-                rpr = run.find(qn("w:rPr"))
-                if rpr is None:
-                    rpr = OxmlElement("w:rPr"); run.insert(0, rpr)
 
             sub_e = OxmlElement("w:p")
             pPr = OxmlElement("w:pPr")
